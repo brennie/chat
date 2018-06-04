@@ -22,3 +22,6 @@ path = "src/common/lib.rs"
 [dependencies]
 structopt = "0.2.8"
 structopt-derive = "0.2.8"
+slog = "2.2.3"
+slog-async = "2.3.0"
+slog-term = "2.4.0"
