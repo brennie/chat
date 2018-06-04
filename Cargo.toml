@@ -32,3 +32,4 @@ structopt-derive = "0.2.8"
 tokio = "0.1.6"
 tokio-io = "0.1.6"
 tokio-serde-json = { git = "https://github.com/carllerche/tokio-serde-json" }
+failure = "0.1.1"
