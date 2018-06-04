@@ -20,3 +20,5 @@ name = "chat_common"
 path = "src/common/lib.rs"
 
 [dependencies]
+structopt = "0.2.8"
+structopt-derive = "0.2.8"
