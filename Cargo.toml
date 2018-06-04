@@ -1,0 +1,22 @@
+[package]
+name = "chat"
+version = "0.1.0"
+authors = ["Barret Rennie <barret@brennie.ca>"]
+license = "MIT/Apache-2.0"
+
+homepage = "https://github.com/brennie/chat"
+repository = "https://github.com/brennie/chat.git"
+
+[[bin]]
+name = "server"
+path = "src/server/main.rs"
+
+[[bin]]
+name = "client"
+path = "src/client/main.rs"
+
+[lib]
+name = "chat_common"
+path = "src/common/lib.rs"
+
+[dependencies]
