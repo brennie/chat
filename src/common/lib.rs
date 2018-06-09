@@ -28,38 +28,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_json_repr_greeting() {
-        let msg = MessageKind::Greeting(GreetingMessage {
-            motd: "This is the message of the day".into(),
-        });
+    fn test_serde() {
 
-        let expected = json!({
-            "kind": "greeting",
-            "motd": "This is the message of the day"
-        });
+        let tests = vec![
+            (
+                MessageKind::Greeting(GreetingMessage {
+                    motd: "This is the message of the day".into(),
+                }),
+                json!({
+                    "kind": "greeting",
+                    "motd": "This is the message of the day",
+                }),
+            ),
+            (
+                MessageKind::Goodbye(GoodbyeMessage{
+                    reason: Some("User quit".into()),
+                }),
+                json!({
+                    "kind": "goodbye",
+                    "reason": "User quit",
+                }),
+            ),
+            (
+                MessageKind::Goodbye(GoodbyeMessage {
+                    reason: None,
+                }),
+                json!({"kind": "goodbye"})
+            )
+        ];
 
-        assert_eq!(serde_json::to_value(&msg).unwrap(), expected);
-    }
+        for (msg, expected) in tests {
+            let serialized = serde_json::to_string(&msg).unwrap();
 
-    #[test]
-    fn test_json_repr_goodbye() {
-        let msg = MessageKind::Goodbye(GoodbyeMessage { reason: None });
+            assert_eq!(serde_json::to_value(&msg).unwrap(), expected);
+            assert_eq!(serde_json::from_str::<MessageKind>(&serialized).unwrap(), msg);
+        }
 
-        let expected = json!({
-            "kind": "goodbye",
-        });
-
-        assert_eq!(serde_json::to_value(&msg).unwrap(), expected);
-
-        let msg = MessageKind::Goodbye(GoodbyeMessage {
-            reason: Some("User quit.".into()),
-        });
-
-        let expected = json!({
-            "kind": "goodbye",
-            "reason": "User quit.",
-        });
-
-        assert_eq!(serde_json::to_value(&msg).unwrap(), expected);
     }
 }
