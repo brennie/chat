@@ -24,12 +24,14 @@ pub enum ServerMessage {
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum ClientMessageKind {
     Goodbye(GoodbyeMessage),
+    AuthRequest(AuthRequestMessage),
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum ServerMessageKind {
     Greeting(GreetingMessage),
+    AuthResponse(AuthResponseMessage),
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -41,6 +43,16 @@ pub struct GoodbyeMessage {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct GreetingMessage {
     pub motd: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AuthRequestMessage {
+    pub username: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AuthResponseMessage {
+    pub result: Result<String, String>
 }
 
 #[cfg(test)]
@@ -65,6 +77,15 @@ mod tests {
                 json!({
                     "kind": "goodbye",
                     "reason": "user quit",
+                }),
+            ),
+            (
+                AuthRequest(AuthRequestMessage {
+                    username: "foo".into(),
+                }),
+                json!({
+                    "kind": "auth_request",
+                    "username": "foo",
                 }),
             ),
         ];
@@ -115,6 +136,28 @@ mod tests {
                     "kind": "goodbye",
                     "source": "user",
                     "reason": "Goodbye, world.",
+                }),
+            ),
+            (
+                FromServer(ServerMessageKind::AuthResponse(AuthResponseMessage {
+                    result: Ok("username".into()),
+                })),
+                json!({
+                    "kind": "auth_response",
+                    "result": {
+                        "Ok": "username",
+                    },
+                }),
+            ),
+            (
+                FromServer(ServerMessageKind::AuthResponse(AuthResponseMessage {
+                    result: Err("Invalid username".into()),
+                })),
+                json!({
+                    "kind": "auth_response",
+                    "result": {
+                        "Err": "Invalid username",
+                    },
                 }),
             ),
         ];
