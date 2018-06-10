@@ -22,13 +22,8 @@ use tokio::prelude::*;
 /// A simple chat server.
 struct Options {
     /// The IP address to listen on.
-    #[structopt(
-        short = "h",
-        long = "host",
-        default_value = "127.0.0.1",
-        env = "CHAT_HOST",
-        parse(try_from_str)
-    )]
+    #[structopt(short = "h", long = "host", default_value = "127.0.0.1", env = "CHAT_HOST",
+                parse(try_from_str))]
     host: IpAddr,
 
     /// The port to bind to.
@@ -138,15 +133,18 @@ fn handle_conn(
     log: slog::Logger,
     stream: tokio::net::TcpStream,
 ) -> impl Future<Item = (), Error = ()> {
-    use chat_common::{GoodbyeMessage, GreetingMessage, MessageKind::*};
+    use chat_common::*;
+
     let (send, recv) = tokio_io::codec::length_delimited::Framed::new(stream).split();
 
-    let send = tokio_serde_json::WriteJson::<_, chat_common::MessageKind>::new(send);
-    let recv = tokio_serde_json::ReadJson::<_, chat_common::MessageKind>::new(recv);
+    let send = tokio_serde_json::WriteJson::<_, chat_common::ServerMessage>::new(send);
+    let recv = tokio_serde_json::ReadJson::<_, chat_common::ClientMessageKind>::new(recv);
 
-    send.send(Greeting(GreetingMessage {
-        motd: "Hello, world!".into(),
-    })).map_err({
+    send.send(ServerMessage::FromServer(ServerMessageKind::Greeting(
+        GreetingMessage {
+            motd: "Hello, world!".into(),
+        },
+    ))).map_err({
             let log = log.clone();
             move |err| {
                 error!(log, "Could not send!"; "error" => %err);
@@ -166,7 +164,7 @@ fn handle_conn(
                     let log = log.clone();
                     move |(maybe_msg, recv)| {
                         match maybe_msg {
-                            Some(Goodbye(GoodbyeMessage { ref reason })) => {
+                            Some(ClientMessageKind::Goodbye(GoodbyeMessage { ref reason })) => {
                                 info!(log, "Goodbye."; "reason" => reason);
                             }
 
@@ -178,7 +176,7 @@ fn handle_conn(
                                 error!(log, "Connection terminated unexpectedly.");
                             }
                         }
-                        
+
                         futures::future::ok(())
                     }
                 })

@@ -5,8 +5,31 @@ extern crate serde_derive;
 extern crate serde_json;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct GreetingMessage {
-    pub motd: String,
+#[serde(untagged)]
+pub enum ServerMessage {
+    /// A message that is being forwarded by the server from another client.
+    FromClient {
+        /// The source of the message.
+        source: String,
+
+        /// The content of the message.
+        #[serde(flatten)]
+        content: ClientMessageKind,
+    },
+
+    FromServer(ServerMessageKind),
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum ClientMessageKind {
+    Goodbye(GoodbyeMessage),
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum ServerMessageKind {
+    Greeting(GreetingMessage),
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -16,11 +39,8 @@ pub struct GoodbyeMessage {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-#[serde(tag = "kind")]
-pub enum MessageKind {
-    Greeting(GreetingMessage),
-    Goodbye(GoodbyeMessage),
+pub struct GreetingMessage {
+    pub motd: String,
 }
 
 #[cfg(test)]
@@ -28,41 +48,85 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_serde() {
+    fn test_serde_client_message() {
+        use ClientMessageKind::*;
 
         let tests = vec![
             (
-                MessageKind::Greeting(GreetingMessage {
-                    motd: "This is the message of the day".into(),
-                }),
+                Goodbye(GoodbyeMessage { reason: None }),
                 json!({
-                    "kind": "greeting",
-                    "motd": "This is the message of the day",
+                    "kind": "goodbye",
                 }),
             ),
             (
-                MessageKind::Goodbye(GoodbyeMessage{
-                    reason: Some("User quit".into()),
+                Goodbye(GoodbyeMessage {
+                    reason: Some("user quit".into()),
                 }),
                 json!({
                     "kind": "goodbye",
-                    "reason": "User quit",
+                    "reason": "user quit",
+                }),
+            ),
+        ];
+
+        for (msg, expected_value) in tests {
+            let serialized = serde_json::to_string(&msg).unwrap();
+
+            assert_eq!(serde_json::to_value(&msg).unwrap(), expected_value);
+            assert_eq!(
+                serde_json::from_str::<ClientMessageKind>(&serialized).unwrap(),
+                msg
+            );
+        }
+    }
+
+    #[test]
+    fn test_serde_server_message() {
+        use ServerMessage::*;
+
+        let tests = vec![
+            (
+                FromServer(ServerMessageKind::Greeting(GreetingMessage {
+                    motd: "Hello, world!".into(),
+                })),
+                json!({
+                    "kind": "greeting",
+                    "motd": "Hello, world!",
                 }),
             ),
             (
-                MessageKind::Goodbye(GoodbyeMessage {
-                    reason: None,
+                FromClient {
+                    source: "user".into(),
+                    content: ClientMessageKind::Goodbye(GoodbyeMessage { reason: None }),
+                },
+                json!({
+                    "kind": "goodbye",
+                    "source": "user",
                 }),
-                json!({"kind": "goodbye"})
-            )
+            ),
+            (
+                FromClient {
+                    source: "user".into(),
+                    content: ClientMessageKind::Goodbye(GoodbyeMessage {
+                        reason: Some("Goodbye, world.".into()),
+                    }),
+                },
+                json!({
+                    "kind": "goodbye",
+                    "source": "user",
+                    "reason": "Goodbye, world.",
+                }),
+            ),
         ];
 
-        for (msg, expected) in tests {
+        for (msg, expected_value) in tests {
             let serialized = serde_json::to_string(&msg).unwrap();
 
-            assert_eq!(serde_json::to_value(&msg).unwrap(), expected);
-            assert_eq!(serde_json::from_str::<MessageKind>(&serialized).unwrap(), msg);
+            assert_eq!(serde_json::to_value(&msg).unwrap(), expected_value);
+            assert_eq!(
+                serde_json::from_str::<ServerMessage>(&serialized).unwrap(),
+                msg
+            );
         }
-
     }
 }

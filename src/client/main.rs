@@ -7,7 +7,7 @@ extern crate tokio;
 extern crate tokio_io;
 extern crate tokio_serde_json;
 
-use chat_common::{GoodbyeMessage, GreetingMessage, MessageKind::*};
+use chat_common::*;
 use std::net::{IpAddr, SocketAddr};
 use structopt::StructOpt;
 use tokio::prelude::*;
@@ -37,14 +37,16 @@ fn main() {
         .and_then(|stream| {
             let (send, recv) = tokio_io::codec::length_delimited::Framed::new(stream).split();
 
-            let send = tokio_serde_json::WriteJson::<_, chat_common::MessageKind>::new(send);
-            let recv = tokio_serde_json::ReadJson::<_, chat_common::MessageKind>::new(recv);
+            let send = tokio_serde_json::WriteJson::<_, chat_common::ClientMessageKind>::new(send);
+            let recv = tokio_serde_json::ReadJson::<_, chat_common::ServerMessage>::new(recv);
 
             recv.into_future()
                 .map_err(|(err, _)| eprintln!("Stream error: {:?}", err))
                 .and_then(|(maybe_msg, recv)| {
                     match maybe_msg {
-                        Some(Greeting(GreetingMessage { ref motd })) => {
+                        Some(ServerMessage::FromServer(ServerMessageKind::Greeting(
+                            GreetingMessage { ref motd },
+                        ))) => {
                             println!("recvd: {}", motd);
                             futures::future::ok((send, recv))
                         }
@@ -59,7 +61,7 @@ fn main() {
                             futures::future::err(())
                         }
                     }.and_then(|(send, recv)| {
-                        send.send(Goodbye(GoodbyeMessage {
+                        send.send(ClientMessageKind::Goodbye(GoodbyeMessage {
                             reason: Some("Transaction complete".into()),
                         })).map_err(|err| eprintln!("Stream error: {:?}", err))
                             .map(move |send| (send, recv))
