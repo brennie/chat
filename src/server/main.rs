@@ -12,18 +12,32 @@ extern crate tokio;
 extern crate tokio_io;
 extern crate tokio_serde_json;
 
-use slog::Drain;
 use std::net::IpAddr;
+
+use futures::future;
+use slog::Drain;
 use structopt::StructOpt;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::prelude::*;
+use tokio_io::codec::length_delimited;
+
+use chat_common::*;
+
+type Send<S> = tokio_serde_json::WriteJson<length_delimited::FramedWrite<S>, ServerMessage>;
+type Recv<R> = tokio_serde_json::ReadJson<length_delimited::FramedRead<R>, ClientMessageKind>;
 
 #[derive(Debug, StructOpt)]
 #[structopt(name = "server")]
 /// A simple chat server.
 struct Options {
     /// The IP address to listen on.
-    #[structopt(short = "h", long = "host", default_value = "127.0.0.1", env = "CHAT_HOST",
-                parse(try_from_str))]
+    #[structopt(
+        short = "h",
+        long = "host",
+        default_value = "127.0.0.1",
+        env = "CHAT_HOST",
+        parse(try_from_str)
+    )]
     host: IpAddr,
 
     /// The port to bind to.
@@ -135,50 +149,104 @@ fn handle_conn(
 ) -> impl Future<Item = (), Error = ()> {
     use chat_common::*;
 
-    let (send, recv) = tokio_io::codec::length_delimited::Framed::new(stream).split();
-
+    let (recv, send) = stream.split();
+    let send = length_delimited::FramedWrite::new(send);
     let send = tokio_serde_json::WriteJson::<_, chat_common::ServerMessage>::new(send);
-    let recv = tokio_serde_json::ReadJson::<_, chat_common::ClientMessageKind>::new(recv);
 
-    send.send(ServerMessage::FromServer(ServerMessageKind::Greeting(
-        GreetingMessage {
-            motd: "Hello, world!".into(),
-        },
-    ))).map_err({
+    let recv = tokio_serde_json::ReadJson::<_, chat_common::ClientMessageKind>::new(
+        length_delimited::FramedRead::new(recv),
+    );
+
+    do_handshake(log.clone(), send, recv)
+        .map_err({
             let log = log.clone();
             move |err| {
-                error!(log, "Could not send!"; "error" => %err);
-                ()
+                error!(log, "An error occurred during handshaking: {}", err);
             }
         })
-        .and_then(move |send| {
-            recv.into_future()
+        .and_then(move |(log, send, recv)| {
+            send.send(ServerMessage::FromServer(ServerMessageKind::Greeting(
+                GreetingMessage {
+                    motd: "Hello, world!".into(),
+                },
+            ))).map_err(|err| failure::Error::from(err))
+                .and_then({
+                    let log = log.clone();
+                    move |_| read_loop(log, recv)
+                })
                 .map_err({
                     let log = log.clone();
-                    move |(err, _)| {
-                        error!(log, "Stream error"; "error" => %err);
-                        ()
+                    move |err| {
+                        error!(log, "An unexpected error occurred: {}", err);
                     }
+                })
+        })
+        .and_then(|_| future::ok(()))
+}
+
+fn do_handshake<S, R>(
+    log: slog::Logger,
+    send: Send<S>,
+    recv: Recv<R>,
+) -> impl Future<Item = (slog::Logger, Send<S>, Recv<R>), Error = failure::Error>
+where
+    S: AsyncWrite,
+    R: AsyncRead,
+{
+    recv.into_future()
+        .map_err(|(err, _)| err.into())
+        .and_then(move |(maybe_msg, recv)| match maybe_msg {
+            Some(ClientMessageKind::AuthRequest(AuthRequestMessage { username })) => {
+                future::ok(((send, recv), username))
+            }
+            Some(_) => future::err(failure::err_msg("Unexpected message during handshake.")),
+            None => future::err(failure::err_msg("Connection closed unexpectedly.")),
+        })
+        .and_then({
+            let log = log.clone();
+            move |((send, recv), username)| {
+                let log = log.new(o!("username" => username.clone()));
+                send.send(ServerMessage::FromServer(ServerMessageKind::AuthResponse(
+                    AuthResponseMessage {
+                        result: Ok(username),
+                    },
+                ))).map_err(|err| err.into())
+                    .and_then(|send| {
+                        info!(log, "Client authenticated.");
+                        future::ok((log, send, recv))
+                    })
+            }
+        })
+}
+
+fn read_loop<R>(log: slog::Logger, recv: Recv<R>) -> impl Future<Item = (), Error = failure::Error>
+where
+    R: AsyncRead,
+{
+    use ClientMessageKind::*;
+
+    future::loop_fn(recv.into_future(), {
+        let log = log.clone();
+        move |stream_fut| {
+            stream_fut
+                .map_err(|(err, _)| err.into())
+                .and_then(|(maybe_msg, stream)| match maybe_msg {
+                    Some(msg) => future::ok((msg, stream)),
+                    None => future::err(failure::err_msg("Client unexpectedly closed connection.")),
                 })
                 .and_then({
                     let log = log.clone();
-                    move |(maybe_msg, recv)| {
-                        match maybe_msg {
-                            Some(ClientMessageKind::Goodbye(GoodbyeMessage { ref reason })) => {
-                                info!(log, "Goodbye."; "reason" => reason);
-                            }
-
-                            Some(msg) => {
-                                info!(log, "Received unexpected message."; "msg" => ?msg);
-                            }
-
-                            None => {
-                                error!(log, "Connection terminated unexpectedly.");
-                            }
+                    move |(msg, stream)| match msg {
+                        Goodbye(GoodbyeMessage { reason }) => {
+                            info!(log, "Client disconnected."; "reason" => ?reason);
+                            Ok(future::Loop::Break(()))
                         }
-
-                        futures::future::ok(())
+                        _ => {
+                            info!(log, "Unexpected message in read loop.");
+                            Ok(future::Loop::Continue(stream.into_future()))
+                        }
                     }
                 })
-        })
+        }
+    })
 }
