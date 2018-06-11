@@ -12,16 +12,11 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use structopt::StructOpt;
-use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::prelude::*;
 use tokio::timer::Delay;
-use tokio_io::codec::length_delimited;
 
-use chat_common::*;
-
-type Send<S> = tokio_serde_json::WriteJson<length_delimited::FramedWrite<S>, ClientMessageKind>;
-type Recv<R> = tokio_serde_json::ReadJson<length_delimited::FramedRead<R>, ServerMessage>;
+use chat_common::{join_stream, messages, split_stream, Recv, Send};
 
 #[derive(Debug, StructOpt)]
 #[structopt(name = "server")]
@@ -46,23 +41,29 @@ fn main() {
     let client = TcpStream::connect(&addr)
         .map_err(|err| failure::Error::from(err))
         .and_then(|stream| {
-            let (recv, send) = stream.split();
-            let send = length_delimited::FramedWrite::new(send);
-            let send = tokio_serde_json::WriteJson::<_, chat_common::ClientMessageKind>::new(send);
+            use messages::handshake::{AuthRequest, AuthResponse};
 
-            let recv = length_delimited::FramedRead::new(recv);
-            let recv = tokio_serde_json::ReadJson::<_, chat_common::ServerMessage>::new(recv);
+            let (recv, send) = split_stream::<AuthResponse, AuthRequest>(stream);
 
-            Ok((send, recv))
+            Ok((recv, send))
         })
-        .and_then(|(send, recv)| do_handshake(options.username, send, recv))
-        .and_then(|((send, recv), username)| {
+        .and_then(|(recv, send)| do_handshake(options.username, recv, send))
+        .and_then(|(recv, send, username)| {
+            use messages::{client::ClientMessageKind, server::ServerMessage};
+
+            let stream = join_stream(recv, send).unwrap();
+            let (recv, send) = split_stream::<ServerMessage, ClientMessageKind>(stream);
+
+            future::ok((recv, send, username))
+        })
+        .and_then(|(recv, send, username)| {
+            println!("authenticated as {}", username);
             let reader = read_loop(recv);
 
             let writer = Delay::new(Instant::now() + Duration::from_secs(5))
                 .map_err(|err| failure::Error::from(err))
                 .and_then(|_| {
-                    use ClientMessageKind::*;
+                    use messages::client::{*, ClientMessageKind::*};
 
                     send.send(Goodbye(GoodbyeMessage {
                         reason: Some("timed out".into()),
@@ -80,54 +81,49 @@ fn main() {
     tokio::run(client);
 }
 
- fn do_handshake<S, R>(
+fn do_handshake(
     username: String,
-    send: Send<S>,
-    recv: Recv<R>,
-) -> impl Future<Item = ((Send<S>, Recv<R>), String), Error = failure::Error>
-where
-    S: AsyncWrite,
-    R: AsyncRead,
-{
-    send.send(ClientMessageKind::AuthRequest(AuthRequestMessage {
-        username: username.into(),
-    })).map_err(|err| err.into())
+    recv: Recv<messages::handshake::AuthResponse>,
+    send: Send<messages::handshake::AuthRequest>,
+) -> impl Future<
+    Item = (
+        Recv<messages::handshake::AuthResponse>,
+        Send<messages::handshake::AuthRequest>,
+        String,
+    ),
+    Error = failure::Error,
+> {
+    use messages::handshake::{AuthRequest, AuthResponse};
+
+    send.send(AuthRequest::AuthRequest {
+        username: username,
+    }).map_err(|err| err.into())
         .and_then(move |send| {
             recv.into_future()
                 .map_err(|(err, _)| err.into())
                 .and_then(|(maybe_msg, recv)| match maybe_msg {
-                    Some(ServerMessage::FromServer(ServerMessageKind::AuthResponse(
-                        AuthResponseMessage { result },
-                    ))) => match result {
-                        Ok(username) => future::ok(((send, recv), username)),
+                    Some(AuthResponse::AuthResponse { result }) => match result {
+                        Ok(username) => future::ok((recv, send, username)),
                         Err(err) => future::err(failure::err_msg(err)),
                     },
-
-                    Some(_) => {
-                        future::err(failure::err_msg("Unexpected message during handshake."))
-                    }
 
                     None => future::err(failure::err_msg("Connection closed unexpectedly.")),
                 })
         })
 }
 
-fn read_loop<R>(recv: Recv<R>) -> impl Future<Item = (), Error = failure::Error>
-where
-    R: AsyncRead,
+fn read_loop(recv: Recv<messages::server::ServerMessage>) -> impl Future<Item = (), Error = failure::Error>
 {
+    use messages::server::{*, ServerMessage::*, ServerMessageKind::*};
+
     recv.map_err(|err| err.into())
         .for_each(|msg| {
-            use ServerMessage::*;
-            use ServerMessageKind::*;
-
             match msg {
                 _m @ FromClient { .. } => unimplemented!(),
                 FromServer(msg) => match msg {
                     Greeting(GreetingMessage { ref motd }) => {
                         println!("MOTD: {}", motd);
                     }
-                    _ => unimplemented!(),
                 },
             };
 

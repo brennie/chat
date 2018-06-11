@@ -1,6 +1,7 @@
 extern crate chat_common;
 extern crate failure;
 extern crate futures;
+extern crate serde;
 #[macro_use]
 extern crate slog;
 extern crate slog_async;
@@ -10,21 +11,15 @@ extern crate structopt;
 extern crate structopt_derive;
 extern crate tokio;
 extern crate tokio_io;
-extern crate tokio_serde_json;
 
 use std::net::IpAddr;
 
 use futures::future;
 use slog::Drain;
 use structopt::StructOpt;
-use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::prelude::*;
-use tokio_io::codec::length_delimited;
 
-use chat_common::*;
-
-type Send<S> = tokio_serde_json::WriteJson<length_delimited::FramedWrite<S>, ServerMessage>;
-type Recv<R> = tokio_serde_json::ReadJson<length_delimited::FramedRead<R>, ClientMessageKind>;
+use chat_common::{join_stream, messages, split_stream, Recv, Send};
 
 #[derive(Debug, StructOpt)]
 #[structopt(name = "server")]
@@ -147,24 +142,28 @@ fn handle_conn(
     log: slog::Logger,
     stream: tokio::net::TcpStream,
 ) -> impl Future<Item = (), Error = ()> {
-    use chat_common::*;
+    use chat_common::messages::{client::*, handshake, server::*};
 
-    let (recv, send) = stream.split();
-    let send = length_delimited::FramedWrite::new(send);
-    let send = tokio_serde_json::WriteJson::<_, chat_common::ServerMessage>::new(send);
-
-    let recv = tokio_serde_json::ReadJson::<_, chat_common::ClientMessageKind>::new(
-        length_delimited::FramedRead::new(recv),
-    );
-
-    do_handshake(log.clone(), send, recv)
-        .map_err({
+    future::ok(split_stream::<handshake::AuthRequest, handshake::AuthResponse>(stream))
+        .and_then({
             let log = log.clone();
-            move |err| {
-                error!(log, "An error occurred during handshaking: {}", err);
+            move |(recv, send)| {
+                do_handshake(log.clone(), recv, send)
+                    .map_err({
+                        let log = log.clone();
+                        move |err| {
+                            error!(log, "An error occurred during handshaking: {}", err);
+                        }
+                    })
+                    .and_then(|(log, recv, send)| {
+                        let stream = join_stream(recv, send).unwrap();
+                        let (recv, send) = split_stream::<ClientMessageKind, ServerMessage>(stream);
+
+                        future::ok((log, recv, send))
+                    })
             }
         })
-        .and_then(move |(log, send, recv)| {
+        .and_then(move |(log, recv, send)| {
             send.send(ServerMessage::FromServer(ServerMessageKind::Greeting(
                 GreetingMessage {
                     motd: "Hello, world!".into(),
@@ -184,47 +183,46 @@ fn handle_conn(
         .and_then(|_| future::ok(()))
 }
 
-fn do_handshake<S, R>(
+fn do_handshake(
     log: slog::Logger,
-    send: Send<S>,
-    recv: Recv<R>,
-) -> impl Future<Item = (slog::Logger, Send<S>, Recv<R>), Error = failure::Error>
-where
-    S: AsyncWrite,
-    R: AsyncRead,
-{
+    recv: Recv<messages::handshake::AuthRequest>,
+    send: Send<messages::handshake::AuthResponse>,
+) -> impl Future<
+    Item = (
+        slog::Logger,
+        Recv<messages::handshake::AuthRequest>,
+        Send<messages::handshake::AuthResponse>,
+    ),
+    Error = failure::Error,
+> {
+    use messages::handshake::{AuthRequest, AuthResponse};
+
     recv.into_future()
         .map_err(|(err, _)| err.into())
         .and_then(move |(maybe_msg, recv)| match maybe_msg {
-            Some(ClientMessageKind::AuthRequest(AuthRequestMessage { username })) => {
-                future::ok(((send, recv), username))
-            }
-            Some(_) => future::err(failure::err_msg("Unexpected message during handshake.")),
+            Some(AuthRequest::AuthRequest { username }) => future::ok(((send, recv), username)),
             None => future::err(failure::err_msg("Connection closed unexpectedly.")),
         })
         .and_then({
             let log = log.clone();
             move |((send, recv), username)| {
                 let log = log.new(o!("username" => username.clone()));
-                send.send(ServerMessage::FromServer(ServerMessageKind::AuthResponse(
-                    AuthResponseMessage {
-                        result: Ok(username),
-                    },
-                ))).map_err(|err| err.into())
+                send.send(AuthResponse::AuthResponse {
+                    result: Ok(username.clone()),
+                }).map_err(|err| err.into())
                     .and_then(|send| {
                         info!(log, "Client authenticated.");
-                        future::ok((log, send, recv))
+                        future::ok((log, recv, send))
                     })
             }
         })
 }
 
-fn read_loop<R>(log: slog::Logger, recv: Recv<R>) -> impl Future<Item = (), Error = failure::Error>
-where
-    R: AsyncRead,
-{
-    use ClientMessageKind::*;
-
+fn read_loop(
+    log: slog::Logger,
+    recv: Recv<messages::client::ClientMessageKind>,
+) -> impl Future<Item = (), Error = failure::Error> {
+    use messages::client::{ClientMessageKind::*, *};
     future::loop_fn(recv.into_future(), {
         let log = log.clone();
         move |stream_fut| {
@@ -236,14 +234,10 @@ where
                 })
                 .and_then({
                     let log = log.clone();
-                    move |(msg, stream)| match msg {
+                    move |(msg, _stream)| match msg {
                         Goodbye(GoodbyeMessage { reason }) => {
                             info!(log, "Client disconnected."; "reason" => ?reason);
                             Ok(future::Loop::Break(()))
-                        }
-                        _ => {
-                            info!(log, "Unexpected message in read loop.");
-                            Ok(future::Loop::Continue(stream.into_future()))
                         }
                     }
                 })
